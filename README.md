@@ -159,6 +159,8 @@ Run `python tools/test_published_actions.py /tmp/meadow-published-actions` to ve
 rejection. Old Bedrock player images must be rebuilt with the native sidecar player; game upgrades cannot supply their
 missing provider configuration.
 
-The published image also contains the native LLM player. Create a separate policy using
-`python -m coworld.examples.meadow.player.player llm` and enable its hosted LLM sidecar.
-Certification uses the bundled scripted policies without inference spending.
+The published manifest bundles the native `llm` model player (`python -m coworld.examples.meadow.player.player llm` with
+`COWORLD_LLM_ENABLED=true` and `COWORLD_LLM_MODEL=anthropic/claude-haiku-4.5`) alongside the six scripted baseline
+opponents (`sustainable`, `greedy`, `reciprocator`, `deterrable`, `enforcer`, `random`). Certification seats both the
+`llm` model player and all six scripted baselines; hosted certification routes the `llm` seat through the platform LLM
+sidecar (`COWORLD_LLM_ENDPOINT`).

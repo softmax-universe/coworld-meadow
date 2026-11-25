@@ -275,6 +275,21 @@
       "run": ["python", "-m", "coworld.examples.meadow.player.player", "random"],
       "source_url": "https://github.com/Metta-AI/coworld-meadow/tree/main/src/coworld/examples/meadow/player",
       "description": "Uniform random harvests; the maximum-variance control."
+    },
+    {
+      "id": "llm",
+      "name": "LLM Player",
+      "type": "player",
+      "image": "{{MEADOW_IMAGE}}",
+      "run": ["python", "-m", "coworld.examples.meadow.player.player", "llm"],
+      "env": {
+        "COWORLD_LLM_ENABLED": "true",
+        "COWORLD_LLM_MODEL": "anthropic/claude-haiku-4.5",
+        "COWORLD_LLM_TEMPERATURE": "1",
+        "COWORLD_LLM_MAX_TOKENS": "1024"
+      },
+      "source_url": "https://github.com/Metta-AI/coworld-meadow/tree/main/src/coworld/examples/meadow/player",
+      "description": "Native LLM player calling the hosted Coworld Messages sidecar via COWORLD_LLM_ENDPOINT and COWORLD_LLM_MODEL."
     }
   ],
   "grader": [
@@ -386,15 +401,15 @@
   "certification": {
     "game_config": {
       "rounds": 20,
-      "round_seconds": 2,
+      "round_seconds": 20,
       "ledger_public": true,
       "sanctions_enabled": true,
       "chat_enabled": true,
       "norm_text": "Posted quota: 1 per player per round keeps the meadow alive.",
       "player_connect_timeout_seconds": 180,
       "players": [
-        { "name": "Sustainable 1" },
-        { "name": "Sustainable 2" },
+        { "name": "LLM" },
+        { "name": "Sustainable" },
         { "name": "Reciprocator 1" },
         { "name": "Reciprocator 2" },
         { "name": "Enforcer" },
@@ -404,7 +419,7 @@
       ]
     },
     "players": [
-      { "player_id": "sustainable" },
+      { "player_id": "llm" },
       { "player_id": "sustainable" },
       { "player_id": "reciprocator" },
       { "player_id": "reciprocator" },

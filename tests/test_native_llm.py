@@ -115,3 +115,43 @@ def test_native_player_invalid_output_fails_without_substitute_action(monkeypatc
     assert trajectory.records[-1].status == "failed"
     assert trajectory.records[-1].outcome is None
     assert trajectory.records[-1].participant_outcomes is None
+
+
+def test_parse_reply_accepts_single_markdown_fence_without_inventing_actions():
+    from coworld.examples.meadow.shared.decision import parse_reply
+
+    config = MeadowConfig(num_players=2, chat_enabled=True, sanctions_enabled=True)
+    fenced_json = parse_reply('```json\n{"harvest": 2, "message": "hold 1"}\n```', 0, config)
+    assert fenced_json is not None
+    assert fenced_json.harvest == 2 and fenced_json.message == "hold 1" and fenced_json.sanction is None
+
+    fenced_plain = parse_reply('```\n{"harvest": 1, "sanction": 1}\n```', 0, config)
+    assert fenced_plain is not None
+    assert fenced_plain.harvest == 1 and fenced_plain.sanction == 1
+
+    assert parse_reply('```json\n{"harvest": 99}\n```', 0, config) is None
+    assert parse_reply('```json\n{"message": "no harvest"}\n```', 0, config) is None
+
+
+def test_manifest_registers_native_model_player_and_certification_baselines():
+    from pathlib import Path
+
+    manifest_path = (
+        Path(__file__).resolve().parents[1]
+        / "src/coworld/examples/meadow/coworld_manifest_template.json"
+    )
+    manifest = json.loads(manifest_path.read_text())
+    players_by_id = {entry["id"]: entry for entry in manifest["player"]}
+    assert "llm" in players_by_id
+    llm = players_by_id["llm"]
+    assert llm["run"] == ["python", "-m", "coworld.examples.meadow.player.player", "llm"]
+    assert llm["env"]["COWORLD_LLM_ENABLED"] == "true"
+    assert llm["env"]["COWORLD_LLM_MODEL"] == "anthropic/claude-haiku-4.5"
+    assert "COWORLD_LLM_ENDPOINT" not in llm["env"]
+
+    cert_ids = [slot["player_id"] for slot in manifest["certification"]["players"]]
+    assert "llm" in cert_ids
+    for baseline_id in ("sustainable", "greedy", "reciprocator", "deterrable", "enforcer", "random"):
+        assert baseline_id in players_by_id
+        assert baseline_id in cert_ids
+        assert "COWORLD_LLM_ENABLED" not in players_by_id[baseline_id].get("env", {})
