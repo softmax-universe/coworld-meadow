@@ -32,8 +32,8 @@ def test_response_and_submitted_action_mismatch_retains_rejected_sample():
     attempt = Attempt(policy="native", prompt=None, response='{"harvest":1}')
     decision = apply_player_decision(PlayerDecision(round=0, action=RoundAction(harvest=3),
         attempts=[attempt], selected_attempt_id=attempt.attempt_id), 0, MeadowConfig(num_players=2))
-    assert decision.action == RoundAction()
-    assert decision.selected_attempt_id is None and decision.fallback_origin == "player-parser-mismatch"
+    assert decision.action is None
+    assert decision.selected_attempt_id is None and decision.failure_reason == "player-parser-mismatch"
     assert not decision.attempts[0].accepted
     assert decision.attempts[0].parsed_action["harvest"] == 1
 
@@ -46,14 +46,14 @@ def test_private_complete_writer_preserves_engine_action_and_exclusive_file(tmp_
         response=action.model_dump_json(), parsed_action=action.model_dump(), accepted=True, rejection_reason=None)
     with pytest.raises(ValueError, match="independently executed"):
         trajectory.record(decision_id="0", seat=0, observation={}, prompt=attempt.prompt,
-            attempts=[attempt], executed_action=RoundAction(harvest=1).model_dump(), fallback_origin=None, terminal=True)
+            attempts=[attempt], executed_action=RoundAction(harvest=1).model_dump(), failure_reason=None, terminal=True)
     trajectory.record(decision_id="0", seat=0, observation={}, prompt=attempt.prompt, attempts=[attempt],
-        executed_action=action.model_dump(), fallback_origin=None, terminal=True)
+        executed_action=action.model_dump(), failure_reason=None, terminal=True)
     trajectory.finish(outcome={"scores": [2, 0]}, participant_outcomes={"0": {"score": 2}, "1": {"score": 0}}, completed=True)
     path = tmp_path / "private" / "episode.jsonl"
     trajectory.write(path)
     assert path.stat().st_mode & 0o777 == 0o600
-    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert path.parent.stat().st_mode & 0o700 == 0o700
     assert json.loads(path.read_text().splitlines()[-1])["status"] == "completed"
     with pytest.raises(FileExistsError):
         trajectory.write(path)
@@ -73,12 +73,22 @@ def test_anonymous_prompt_does_not_expose_other_seat_identity_or_private_account
     assert decision_prompt(first, "operator") == decision_prompt(second, "operator")
 
 
-def test_unfinished_native_call_excludes_episode_from_complete_training():
-    trajectory = Trajectory(episode_id="unfinished", game_version="source-fixture",
+def test_failed_decision_cannot_execute_action_or_publish_scores():
+    trajectory = Trajectory(episode_id="failed-episode", game_version="source-fixture",
         source_revision="a" * 40, image_digest=None, seed_family="meadow-0")
     started = Attempt(policy="native", prompt=[{"role": "user", "content": "prompt"}])
+    with pytest.raises(ValueError, match="substitute action"):
+        trajectory.record(decision_id="round-0-seat-0", seat=0, observation={}, prompt=None,
+            attempts=[started], executed_action=RoundAction().model_dump(),
+            failure_reason="missing-or-late-player", terminal=True)
     trajectory.record(decision_id="round-0-seat-0", seat=0, observation={}, prompt=None,
-        attempts=[started], executed_action=RoundAction().model_dump(),
-        fallback_origin="missing-or-late-player", terminal=True)
-    trajectory.finish(outcome={"scores": [0, 0]}, participant_outcomes={}, completed=True)
-    assert trajectory.records[-1].status == "truncated"
+        attempts=[started], executed_action=None,
+        failure_reason="missing-or-late-player", terminal=True)
+    with pytest.raises(ValueError, match="publish scores"):
+        trajectory.finish(outcome={"scores": [0, 0]}, participant_outcomes={"0": {"score": 0}},
+            completed=False, failure_reason="seat 0: missing-or-late-player")
+    trajectory.finish(outcome=None, participant_outcomes=None, completed=False,
+        failure_reason="seat 0: missing-or-late-player")
+    assert trajectory.records[-1].status == "failed"
+    assert trajectory.records[-1].outcome is None
+    assert trajectory.records[-1].participant_outcomes is None

@@ -45,6 +45,26 @@ def build_policies(names: list[str], seed: int = 0) -> list[Policy]:
     ]
 
 
+class PolicyFailureError(RuntimeError):
+    """Raised when a seat fails to produce a valid action; no substitute move is played."""
+
+    def __init__(
+        self,
+        *,
+        round_index: int,
+        slot: int,
+        failure_reason: str,
+        decisions: list[PlayerDecision],
+        state: MeadowState,
+    ) -> None:
+        super().__init__(f"round {round_index} seat {slot} policy failure: {failure_reason}")
+        self.round_index = round_index
+        self.slot = slot
+        self.failure_reason = failure_reason
+        self.decisions = decisions
+        self.state = state
+
+
 def run_episode(
     config: MeadowConfig,
     policies: Sequence[Policy],
@@ -83,7 +103,62 @@ def run_episode(
                 if parallel_seats
                 else [decide(slot) for slot in slots]
             )
-            actions = [decision.action for decision in decisions]
+            failed = [
+                (slot, decision)
+                for slot, decision in enumerate(decisions)
+                if decision.action is None or decision.failure_reason is not None
+            ]
+            if failed:
+                first_slot, first_decision = failed[0]
+                summary = "; ".join(
+                    f"seat {slot}: {decision.failure_reason or 'missing-action'}"
+                    for slot, decision in failed
+                )
+                if trajectory is not None:
+                    for slot, decision in enumerate(decisions):
+                        policy = policies[slot]
+                        system, user = decision_prompt(
+                            views[slot],
+                            policy.strategy if isinstance(policy, LlmPolicy) else "",
+                            selection=prompt_selection,
+                        )
+                        views[slot]["prompt_template"] = prompt_selection.metadata(
+                            system["content"], user["content"]
+                        )
+                        attempts = [a.model_copy(deep=True) for a in decision.attempts]
+                        if decision.action is None or decision.failure_reason is not None:
+                            reason = decision.failure_reason or "missing-action"
+                        else:
+                            for attempt in attempts:
+                                attempt.accepted = False
+                                attempt.rejection_reason = (
+                                    "round aborted due to peer policy failure"
+                                )
+                            reason = "episode-aborted-by-peer-failure"
+                        trajectory.record(
+                            decision_id=f"round-{state.round}-seat-{slot}",
+                            seat=slot,
+                            observation=views[slot],
+                            prompt=None,
+                            attempts=attempts,
+                            executed_action=None,
+                            failure_reason=reason,
+                            terminal=True,
+                        )
+                    trajectory.finish(
+                        outcome=None,
+                        participant_outcomes=None,
+                        completed=False,
+                        failure_reason=summary,
+                    )
+                raise PolicyFailureError(
+                    round_index=state.round,
+                    slot=first_slot,
+                    failure_reason=first_decision.failure_reason or "missing-action",
+                    decisions=decisions,
+                    state=state,
+                )
+            actions = [decision.action for decision in decisions if decision.action is not None]
             record = step(state, actions, config)
             if trajectory is not None:
                 for slot, decision in enumerate(decisions):
@@ -111,7 +186,7 @@ def run_episode(
                         prompt=selected.prompt if selected else None,
                         attempts=decision.attempts,
                         executed_action=executed_action(record, slot).model_dump(),
-                        fallback_origin=decision.fallback_origin,
+                        failure_reason=None,
                         terminal=state.round == config.rounds,
                     )
     if trajectory is not None:

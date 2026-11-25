@@ -58,22 +58,38 @@ def test_sanctions_apply_cost_and_burn() -> None:
     assert welfare(state) == pytest.approx(cfg.stock_start + 0.35 * 60 * (1 - 0.6) - 4.0)
 
 
-def test_parse_action_degrades_invalid_input_to_a_pass() -> None:
+def test_parse_action_rejects_invalid_input() -> None:
     cfg = config(sanctions_enabled=True)
-    assert parse_action("not a dict", 0, cfg) == RoundAction()
-    assert parse_action({"harvest": "three"}, 0, cfg).harvest == 0
-    assert parse_action({"harvest": True}, 0, cfg).harvest == 0
-    assert parse_action({"harvest": 99}, 0, cfg).harvest == cfg.max_harvest
-    assert parse_action({"harvest": -2}, 0, cfg).harvest == 0
-    assert parse_action({"harvest": 1, "sanction": 0}, 0, cfg).sanction is None  # no self-sanction
+    for bad in (
+        "not a dict",
+        {},
+        {"harvest": "three"},
+        {"harvest": True},
+        {"harvest": 1.5},
+        {"harvest": 99},
+        {"harvest": -2},
+        {"harvest": 1, "sanction": 0},  # no self-sanction
+        {"harvest": 1, "sanction": 8},  # out-of-range slot
+        {"harvest": 1, "sanction": "2"},
+        {"harvest": 1, "message": 123},
+        {"harvest": 1, "extra": 1},
+    ):
+        with pytest.raises(ValueError):
+            parse_action(bad, 0, cfg)
+
     assert parse_action({"harvest": 1, "sanction": 2}, 0, cfg).sanction == 2
+    assert parse_action({"harvest": 1, "sanction": None}, 0, cfg).sanction is None
     long_message = "x" * 500
     assert len(parse_action({"harvest": 1, "message": long_message}, 0, cfg).message) == cfg.chat_max_chars
 
     quiet = config(chat_enabled=False)
-    assert parse_action({"harvest": 1, "message": "hello"}, 0, quiet).message is None
+    with pytest.raises(ValueError):
+        parse_action({"harvest": 1, "message": "hello"}, 0, quiet)
+    assert parse_action({"harvest": 1, "message": ""}, 0, quiet).message is None
     unarmed = config(sanctions_enabled=False)
-    assert parse_action({"harvest": 1, "sanction": 2}, 0, unarmed).sanction is None
+    with pytest.raises(ValueError):
+        parse_action({"harvest": 1, "sanction": 2}, 0, unarmed)
+    assert parse_action({"harvest": 1, "sanction": None}, 0, unarmed).sanction is None
 
 
 def test_anonymous_treatment_hides_the_ledger() -> None:

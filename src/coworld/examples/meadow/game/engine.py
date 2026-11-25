@@ -115,37 +115,50 @@ def new_state(config: MeadowConfig) -> MeadowState:
 
 
 def parse_action(raw: object, slot: int, config: MeadowConfig) -> RoundAction:
-    """Validate one raw player message into a RoundAction.
+    """Strictly validate one raw player action dict into a RoundAction.
 
-    Invalid input degrades to a pass (harvest 0), mirroring Paint Arena's
-    invalid-move-means-stay contract, so a malformed player never stalls the
-    round barrier.
+    Raises ValueError on malformed or out-of-range input rather than
+    fabricating a substitute move.
     """
     if not isinstance(raw, dict):
-        return RoundAction()
+        raise ValueError("action must be a JSON object")
+    unknown = set(raw) - {"harvest", "sanction", "message"}
+    if unknown:
+        raise ValueError(f"unexpected action fields: {sorted(unknown)}")
+    if "harvest" not in raw:
+        raise ValueError("action requires 'harvest'")
 
-    harvest_raw = raw.get("harvest", 0)
-    harvest = int(harvest_raw) if isinstance(harvest_raw, (int, float)) and not isinstance(harvest_raw, bool) else 0
-    harvest = min(max(harvest, 0), config.max_harvest)
+    harvest_raw = raw["harvest"]
+    if type(harvest_raw) is not int or not (0 <= harvest_raw <= config.max_harvest):
+        raise ValueError(
+            f"harvest must be an integer in 0..{config.max_harvest}, got {harvest_raw!r}"
+        )
 
     sanction: int | None = None
-    if config.sanctions_enabled:
-        sanction_raw = raw.get("sanction")
+    sanction_raw = raw.get("sanction")
+    if sanction_raw is not None:
+        if not config.sanctions_enabled:
+            raise ValueError("sanctions are not enabled")
         if (
-            isinstance(sanction_raw, (int, float))
-            and not isinstance(sanction_raw, bool)
-            and int(sanction_raw) != slot
-            and 0 <= int(sanction_raw) < config.num_players
+            type(sanction_raw) is not int
+            or sanction_raw == slot
+            or not (0 <= sanction_raw < config.num_players)
         ):
-            sanction = int(sanction_raw)
+            raise ValueError(f"invalid sanction target: {sanction_raw!r}")
+        sanction = sanction_raw
 
     message: str | None = None
-    if config.chat_enabled:
-        message_raw = raw.get("message")
-        if isinstance(message_raw, str) and message_raw.strip():
-            message = message_raw.strip()[: config.chat_max_chars].rstrip()
+    message_raw = raw.get("message")
+    if message_raw is not None:
+        if not isinstance(message_raw, str):
+            raise ValueError(f"message must be a string or null, got {message_raw!r}")
+        stripped = message_raw.strip()
+        if stripped:
+            if not config.chat_enabled:
+                raise ValueError("chat is not enabled")
+            message = stripped[: config.chat_max_chars].rstrip()
 
-    return RoundAction(harvest=harvest, sanction=sanction, message=message)
+    return RoundAction(harvest=harvest_raw, sanction=sanction, message=message)
 
 
 def regrow(stock: float, config: MeadowConfig) -> float:

@@ -55,7 +55,7 @@ def test_complete_variant_uses_real_scores(variant: str, rounds: int) -> None:
     }
 
 
-def test_text_mode_accepts_game_chat_and_consumes_malformed_action() -> None:
+def test_text_mode_accepts_game_chat_and_rejects_malformed_action() -> None:
     session = TrainingSession("certification", "text", 1)
     decision = session.reset({"seed": "text", "players": 8})
     result = session.step(
@@ -64,12 +64,15 @@ def test_text_mode_accepts_game_chat_and_consumes_malformed_action() -> None:
             "response": '{"harvest":2,"message":"Share."}',
         }
     )
+    assert result["kind"] == "accepted"
     assert result["action"] == {"harvest": 2, "sanction": None, "message": "Share."}
     assert result["observation"]["seat"] == 1
-    result = session.step(
-        {"decision_id": result["observation"]["decision_id"], "response": "bad reply"}
-    )
-    assert result["action"] == {"harvest": 0, "sanction": None, "message": None}
+    next_id = result["observation"]["decision_id"]
+    for bad in ("bad reply", '{"harvest": 99}', '{"harvest": 1, "sanction": 1}'):
+        rejected = session.step({"decision_id": next_id, "response": bad})
+        assert rejected["kind"] == "rejected"
+        assert session.decision_id == next_id
+        assert session.seat == 1
 
 
 def test_jsonl_process_resets_without_losing_seeded_session() -> None:

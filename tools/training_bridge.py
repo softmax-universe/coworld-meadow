@@ -259,16 +259,23 @@ class TrainingSession:
     def teacher(self) -> dict[str, str]:
         raw = self.teachers[self.seat].act(self.player_view())
         action = parse_action(raw, self.seat, self.config)
-        return {
-            "response": compact(
-                {
-                    "harvest": action.harvest,
-                    "sanction": action.sanction
-                    if action.sanction is not None
-                    else "none",
-                }
-            )
-        }
+        if self.mode == "choice":
+            return {
+                "response": compact(
+                    {
+                        "harvest": action.harvest,
+                        "sanction": action.sanction
+                        if action.sanction is not None
+                        else "none",
+                    }
+                )
+            }
+        reply: dict[str, object] = {"harvest": action.harvest}
+        if self.config.sanctions_enabled:
+            reply["sanction"] = action.sanction
+        if action.message is not None:
+            reply["message"] = action.message
+        return {"response": compact(reply)}
 
     def step(self, request: dict[str, object]) -> dict[str, object]:
         if request["decision_id"] != self.decision_id:
@@ -292,7 +299,23 @@ class TrainingSession:
                 or raw["sanction"] not in encoding[1]["choices"]
             ):
                 return {"kind": "rejected", "reason": "illegal choice"}
-        action = parse_action(raw, self.seat, self.config)
+            action = parse_action(
+                {
+                    "harvest": raw["harvest"],
+                    "sanction": None
+                    if raw["sanction"] == "none"
+                    else raw["sanction"],
+                },
+                self.seat,
+                self.config,
+            )
+        else:
+            if raw is None:
+                return {"kind": "rejected", "reason": "invalid action reply"}
+            try:
+                action = parse_action(raw, self.seat, self.config)
+            except ValueError as error:
+                return {"kind": "rejected", "reason": str(error)}
         self.actions.append(action)
         self.decision_id += 1
         self.seat += 1
@@ -301,7 +324,7 @@ class TrainingSession:
             self.actions = []
             self.seat = 0
         return {
-            "kind": "consumed_rejection" if raw is None else "accepted",
+            "kind": "accepted",
             "action": action.model_dump(),
             "observation": self.observation(),
         }

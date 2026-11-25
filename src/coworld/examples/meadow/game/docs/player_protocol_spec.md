@@ -1,9 +1,10 @@
 # Meadow Player Protocol
 
 Connect to the game's `/player` WebSocket using the runner-provided `COWORLD_PLAYER_WS_URL` (it already carries your
-`slot` and `token` query parameters). The game sends JSON messages; you reply with JSON actions. One action per round;
-if you send several before the round settles, the last one wins. If you send nothing before the round deadline
-(`round_seconds`), you pass (harvest 0).
+`slot` and `token` query parameters). The game sends JSON messages; you reply with JSON action envelopes. One action per
+round; if you send several before the round settles, the last valid one wins. If you send an invalid action or miss the
+round deadline (`round_seconds`), the episode terminates as a policy failure without playing any substitute move or
+publishing scores.
 
 ## Messages you receive
 
@@ -57,13 +58,21 @@ When the episode ends you receive the same shape once with `"type": "final"` and
 ## Actions you send
 
 ```json
-{ "harvest": 2, "sanction": 4, "message": "stop over-harvesting" }
+{
+  "type": "action",
+  "round": 14,
+  "action": { "harvest": 2, "sanction": 4, "message": "stop over-harvesting" }
+}
 ```
 
-- `harvest` (required): integer `0..max_harvest`. Anything invalid degrades to `0`.
-- `sanction` (optional): a player slot to punish. You pay `sanction_cost`, they lose `sanction_burn`. Ignored unless
-  `sanctions_enabled` is true; self-sanctions are ignored.
-- `message` (optional): chat shown to everyone next round, truncated to `chat_max_chars`. Ignored unless `chat_enabled`.
+- `type` (required): `"action"`.
+- `round` (required): integer matching the current observation's `round`. Late replies for earlier rounds are ignored.
+- `action` (required for a valid move; `null` with `failure_reason` for an explicit policy failure):
+  - `harvest` (required): integer `0..max_harvest`. Non-integer or out-of-range values are rejected.
+  - `sanction` (optional): integer player slot to punish (`!= slot`), or `null`. You pay `sanction_cost`, they lose
+    `sanction_burn`. Rejected if `sanctions_enabled` is false, out of range, or equal to your own slot.
+  - `message` (optional): chat shown to everyone next round, truncated to `chat_max_chars`, or `null`/empty. Non-empty
+    messages are rejected when `chat_enabled` is false.
 
 ## The game in one paragraph
 
