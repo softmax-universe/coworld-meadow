@@ -153,7 +153,7 @@ LLM_SYSTEM_PROMPT = """{introduction}
 
 Your goal is to maximize your own final score.{strategy}
 
-Each turn you receive the current game state as JSON. Reply with ONLY one JSON object, no other text:
+Each turn you receive the current game state as JSON. Reply with ONLY one JSON object, no prose or extra keys:
 {{"harvest": <int 0..{max_harvest}>{sanction_field}{message_field}}}"""
 
 LLM_RULES = """Rules:
@@ -179,7 +179,7 @@ def system_prompt(
         sanction_rules = LLM_SANCTION_RULES.format(
             sanction_cost=obs["sanction_cost"], sanction_burn=obs["sanction_burn"]
         )
-        sanction_field = ', "sanction": <player slot int or null>'
+        sanction_field = ', "sanction": <other player slot int or null>'
     message_field = (
         ', "message": "<optional chat, may be empty>"' if obs["chat_enabled"] else ""
     )
@@ -230,6 +230,36 @@ class NativeResponse(BaseModel):
     sampling_evidence: NativeSampling | None = None
 
 
+def _classify_call_failure(reason: str | None) -> str:
+    if not reason:
+        return "deadline-exceeded"
+    lowered = reason.lower()
+    if lowered.startswith("http "):
+        return "http-" + lowered.split(None, 1)[1]
+    if "refusal" in lowered:
+        return "provider-refusal"
+    if "timeout" in lowered:
+        return "timeout"
+    if "urlerror" in lowered:
+        return "url-error"
+    if "jsondecodeerror" in lowered or "validationerror" in lowered:
+        return "invalid-provider-response"
+    return "native-call-failure"
+
+
+def _classify_action_error(error: ValueError) -> str:
+    detail = str(error).lower()
+    if "unexpected action fields" in detail:
+        return "invalid-action-fields"
+    if "sanction" in detail:
+        return "invalid-action-sanction"
+    if "harvest" in detail:
+        return "invalid-action-harvest"
+    if "message" in detail or "chat" in detail:
+        return "invalid-action-message"
+    return "invalid-action"
+
+
 class LlmPolicy:
     """Native sidecar inference with one private attempt per actual HTTP request."""
 
@@ -270,7 +300,20 @@ class LlmPolicy:
         raw = self._complete_messages(
             prompt, obs["slot"], attempts, deadline, on_attempt
         )
-        action = parse_reply(raw, obs["slot"], config) if raw is not None else None
+        action = None
+        failure_category: str | None = None
+        if raw is None:
+            last_reason = attempts[-1].rejection_reason if attempts else None
+            failure_category = _classify_call_failure(last_reason)
+        else:
+            parsed = self._parse(raw)
+            if parsed is None:
+                failure_category = "invalid-json-reply"
+            else:
+                try:
+                    action = parse_action(parsed, obs["slot"], config)
+                except ValueError as error:
+                    failure_category = _classify_action_error(error)
         selected = None
         if action is not None:
             attempts[-1].parsed_action = action.model_dump()
@@ -280,15 +323,19 @@ class LlmPolicy:
         else:
             self.llm_failures += 1
             if attempts and raw is not None:
-                attempts[-1].rejection_reason = "invalid native action reply"
+                attempts[-1].rejection_reason = failure_category or "invalid native action reply"
+            logger.warning(
+                "round %d seat %d native decision failed: %s",
+                obs["round"],
+                obs["slot"],
+                failure_category,
+            )
         return PlayerDecision(
             round=obs["round"],
             action=action,
             attempts=attempts,
             selected_attempt_id=selected,
-            failure_reason=None
-            if selected is not None
-            else "native-call-or-parser-failure",
+            failure_reason=None if selected is not None else failure_category,
         )
 
     def _complete_messages(
@@ -394,8 +441,8 @@ class LlmPolicy:
                         UUID(call_id) if call_id is not None else None
                     )
                     evidence.raw_response = error.read().decode()
+                    evidence.rejection_reason = f"HTTP {error.code}"
                     if error.code not in (429, 529):
-                        evidence.rejection_reason = f"HTTP {error.code}"
                         return None
                 else:
                     return None
