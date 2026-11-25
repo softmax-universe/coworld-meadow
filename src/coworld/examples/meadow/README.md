@@ -51,7 +51,9 @@ uv run coworld certify src/coworld/examples/meadow/dist/coworld_manifest.json
 ```
 
 `play` prints one player-client link per seat (harvest buttons, sanction picker, chat), a global viewer, and an admin
-link (pause/resume, round deadline). Certification runs a 20-round episode with 8 mixed scripted seats, sanctions on.
+link (pause/resume, round deadline). Certification runs a 20-round episode with sanctions on, seating the bundled `llm`
+model player (`COWORLD_LLM_ENABLED=true`, `COWORLD_LLM_MODEL=anthropic/claude-haiku-4.5`) alongside the six scripted
+baseline opponents.
 
 ## Headless experiments
 
