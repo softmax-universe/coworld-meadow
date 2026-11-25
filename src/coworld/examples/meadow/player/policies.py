@@ -411,12 +411,26 @@ class LlmPolicy:
 
     @staticmethod
     def _parse(raw: str) -> dict | None:
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end <= start:
+        text = raw.strip()
+        if not text:
+            return None
+        if text.startswith("```"):
+            header, sep, rest = text.partition("\n")
+            if not sep:
+                return None
+            fence_lang = header[3:].strip().lower()
+            if fence_lang not in {"", "json"}:
+                return None
+            if not rest.endswith("```"):
+                return None
+            inner = rest[:-3]
+            if "```" in inner:
+                return None
+            text = inner.strip()
+        if not (text.startswith("{") and text.endswith("}")):
             return None
         try:
-            parsed = json.loads(raw[start : end + 1])
+            parsed = json.loads(text)
         except json.JSONDecodeError:
             return None
         if not isinstance(parsed, dict) or "harvest" not in parsed:

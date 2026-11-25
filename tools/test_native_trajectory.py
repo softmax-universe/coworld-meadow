@@ -191,6 +191,7 @@ def main() -> None:
             "COGAME_CONFIG_URI": config_path.as_uri(),
             "COGAME_RESULTS_URI": (folder / "results.json").as_uri(),
             "COGAME_SAVE_REPLAY_URI": (folder / "replay.json").as_uri(),
+            "COGAME_PLAYER_FAILURE_URI": (folder / "player_failure.json").as_uri(),
             "COGAME_SAVE_TRAJECTORY_URI": (
                 folder / "trajectory.jsonl"
             ).as_uri(),
@@ -286,6 +287,7 @@ def main() -> None:
             )
             assert len(decisions) == config["rounds"] * len(config["players"])
             assert (folder / "results.json").is_file()
+            assert not (folder / "player_failure.json").exists()
         else:
             assert events[-1]["status"] == "failed"
             assert events[-1]["outcome"] is None
@@ -293,6 +295,10 @@ def main() -> None:
             assert events[-1]["failure_reason"]
             assert len(decisions) == len(config["players"])
             assert not (folder / "results.json").exists()
+            failure_data = json.loads((folder / "player_failure.json").read_text())
+            assert set(failure_data) == {"message", "failed_policy_index"}
+            assert isinstance(failure_data["message"], str) and 1 <= len(failure_data["message"]) <= 2000
+            assert isinstance(failure_data["failed_policy_index"], int) and 0 <= failure_data["failed_policy_index"] < len(config["players"])
             replay_data = json.loads((folder / "replay.json").read_text())
             assert replay_data["failed"] is True
             assert replay_data["results"] is None
