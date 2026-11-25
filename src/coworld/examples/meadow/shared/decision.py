@@ -28,15 +28,51 @@ class PlayerDecision(BaseModel):
     failure_reason: str | None = None
 
 
+def sanitize_error(text: str, *, limit: int = 200) -> str:
+    """Collapse whitespace and bound length for private attempt error records."""
+    return " ".join(text.split())[:limit]
+
+
+def parse_json_object(raw: str) -> dict:
+    """Parse bare JSON or a single fenced JSON object; raise ValueError on failure."""
+    text = raw.strip()
+    if not text:
+        raise ValueError("empty reply")
+    if text.startswith("```"):
+        header, sep, rest = text.partition("\n")
+        if not sep:
+            raise ValueError("unclosed code fence")
+        fence_lang = header[3:].strip().lower()
+        if fence_lang not in {"", "json"}:
+            raise ValueError(
+                f"unsupported code fence language: {sanitize_error(fence_lang, limit=32)}"
+            )
+        if not rest.endswith("```"):
+            raise ValueError("unclosed code fence")
+        inner = rest[:-3]
+        if "```" in inner:
+            raise ValueError("multiple code fences")
+        text = inner.strip()
+    if not (text.startswith("{") and text.endswith("}")):
+        raise ValueError("reply is not a single JSON object")
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"JSONDecodeError: {sanitize_error(error.msg)}") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("reply JSON must be an object")
+    return parsed
+
+
+def parse_reply_strict(raw: str, slot: int, config: MeadowConfig) -> RoundAction:
+    """Use the shared text parser, then strict engine validation, raising ValueError."""
+    return parse_action(parse_json_object(raw), slot, config)
+
+
 def parse_reply(raw: str, slot: int, config: MeadowConfig) -> RoundAction | None:
     """Use the shipped text parser, then strict engine validation."""
-    from coworld.examples.meadow.player.policies import LlmPolicy
-
-    parsed = LlmPolicy._parse(raw)
-    if parsed is None:
-        return None
     try:
-        return parse_action(parsed, slot, config)
+        return parse_reply_strict(raw, slot, config)
     except ValueError:
         return None
 

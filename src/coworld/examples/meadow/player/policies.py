@@ -29,7 +29,9 @@ from coworld.examples.meadow.game.engine import MeadowConfig, parse_action
 from coworld.examples.meadow.shared.decision import (
     PlayerDecision,
     decision_prompt,
-    parse_reply,
+    parse_json_object,
+    parse_reply_strict,
+    sanitize_error,
 )
 from coworld.examples.meadow.shared.trajectory import Attempt
 from coworld.examples.meadow.shared.prompts import PromptSelection
@@ -153,8 +155,8 @@ LLM_SYSTEM_PROMPT = """{introduction}
 
 Your goal is to maximize your own final score.{strategy}
 
-Each turn you receive the current game state as JSON. Reply with ONLY one JSON object, no prose or extra keys:
-{{"harvest": <int 0..{max_harvest}>{sanction_field}{message_field}}}"""
+Each turn you receive the current game state as JSON. Reply with ONLY one JSON object, no other text:
+{{"harvest": <int 0..{max_harvest}>}}{optional_fields}"""
 
 LLM_RULES = """Rules:
 - A shared stock (capacity {stock_capacity}) regrows each round by {regrowth_rate} * stock * (1 - stock/capacity).
@@ -163,7 +165,7 @@ LLM_RULES = """Rules:
 - If total demand exceeds the stock, the remainder is split pro-rata.
 - The game lasts {rounds} rounds. Your score is everything you harvest.{sanction_rules}{norm_line}"""
 
-LLM_SANCTION_RULES = "\n- You may also sanction one player per round: you pay {sanction_cost}, they lose {sanction_burn}."
+LLM_SANCTION_RULES = "\n- You may also sanction one other player per round (never your own slot): you pay {sanction_cost}, they lose {sanction_burn}."
 # Long enough to ride out sustained shared-quota throttling (see BEDROCK.md): a seat that
 # gives up too early records a pass, which poisons the episode as data. ~2 minutes of
 # retries before conceding the round.
@@ -174,14 +176,20 @@ def system_prompt(
     obs: dict, strategy: str = "", *, selection: PromptSelection = PromptSelection()
 ) -> str:
     sanction_rules = ""
-    sanction_field = ""
+    optional_keys: list[str] = []
     if obs["sanctions_enabled"]:
         sanction_rules = LLM_SANCTION_RULES.format(
             sanction_cost=obs["sanction_cost"], sanction_burn=obs["sanction_burn"]
         )
-        sanction_field = ', "sanction": <other player slot int or null>'
-    message_field = (
-        ', "message": "<optional chat, may be empty>"' if obs["chat_enabled"] else ""
+        optional_keys.append('"sanction": <other player slot int>')
+    if obs["chat_enabled"]:
+        optional_keys.append('"message": "<short chat>"')
+    optional_fields = (
+        f"\nOptional {'keys' if len(optional_keys) > 1 else 'key'} (omit when unused): "
+        + ", ".join(optional_keys)
+        + "."
+        if optional_keys
+        else ""
     )
     norm_line = f"\n- Posted notice: {obs['norm_text']}" if obs["norm_text"] else ""
     strategy = (
@@ -200,8 +208,7 @@ def system_prompt(
         sanction_rules=sanction_rules,
         norm_line=norm_line,
         strategy=strategy,
-        sanction_field=sanction_field,
-        message_field=message_field,
+        optional_fields=optional_fields,
     )
 
 
@@ -228,36 +235,6 @@ class NativeResponse(BaseModel):
     stop_reason: str
     usage: NativeUsage
     sampling_evidence: NativeSampling | None = None
-
-
-def _classify_call_failure(reason: str | None) -> str:
-    if not reason:
-        return "deadline-exceeded"
-    lowered = reason.lower()
-    if lowered.startswith("http "):
-        return "http-" + lowered.split(None, 1)[1]
-    if "refusal" in lowered:
-        return "provider-refusal"
-    if "timeout" in lowered:
-        return "timeout"
-    if "urlerror" in lowered:
-        return "url-error"
-    if "jsondecodeerror" in lowered or "validationerror" in lowered:
-        return "invalid-provider-response"
-    return "native-call-failure"
-
-
-def _classify_action_error(error: ValueError) -> str:
-    detail = str(error).lower()
-    if "unexpected action fields" in detail:
-        return "invalid-action-fields"
-    if "sanction" in detail:
-        return "invalid-action-sanction"
-    if "harvest" in detail:
-        return "invalid-action-harvest"
-    if "message" in detail or "chat" in detail:
-        return "invalid-action-message"
-    return "invalid-action"
 
 
 class LlmPolicy:
@@ -301,19 +278,16 @@ class LlmPolicy:
             prompt, obs["slot"], attempts, deadline, on_attempt
         )
         action = None
-        failure_category: str | None = None
+        failure_reason: str | None = None
         if raw is None:
-            last_reason = attempts[-1].rejection_reason if attempts else None
-            failure_category = _classify_call_failure(last_reason)
+            failure_reason = "native-call-failure"
         else:
-            parsed = self._parse(raw)
-            if parsed is None:
-                failure_category = "invalid-json-reply"
-            else:
-                try:
-                    action = parse_action(parsed, obs["slot"], config)
-                except ValueError as error:
-                    failure_category = _classify_action_error(error)
+            try:
+                action = parse_reply_strict(raw, obs["slot"], config)
+            except ValueError as error:
+                failure_reason = "invalid-native-reply"
+                if attempts:
+                    attempts[-1].rejection_reason = sanitize_error(str(error))
         selected = None
         if action is not None:
             attempts[-1].parsed_action = action.model_dump()
@@ -322,20 +296,18 @@ class LlmPolicy:
             selected = attempts[-1].attempt_id
         else:
             self.llm_failures += 1
-            if attempts and raw is not None:
-                attempts[-1].rejection_reason = failure_category or "invalid native action reply"
             logger.warning(
                 "round %d seat %d native decision failed: %s",
                 obs["round"],
                 obs["slot"],
-                failure_category,
+                failure_reason,
             )
         return PlayerDecision(
             round=obs["round"],
             action=action,
             attempts=attempts,
             selected_attempt_id=selected,
-            failure_reason=None if selected is not None else failure_category,
+            failure_reason=None if selected is not None else failure_reason,
         )
 
     def _complete_messages(
@@ -396,7 +368,7 @@ class LlmPolicy:
                         "X-Coworld-Chat-Template-Sha256"
                     )
                     on_attempt(evidence.model_copy(deep=True))
-                    raw_response = response.read().decode()
+                    raw_response = response.read().decode("utf-8", errors="replace")
                     evidence.raw_response = raw_response
                     evidence.latency_ms = (time.monotonic() - started) * 1000
                     payload = json.loads(raw_response)
@@ -434,17 +406,35 @@ class LlmPolicy:
                 ValidationError,
             ) as error:
                 evidence.latency_ms = (time.monotonic() - started) * 1000
-                evidence.rejection_reason = type(error).__name__
                 if isinstance(error, HTTPError):
                     call_id = error.headers.get("X-Softmax-Llm-Call-Id")
                     evidence.platform_call_id = (
                         UUID(call_id) if call_id is not None else None
                     )
-                    evidence.raw_response = error.read().decode()
+                    evidence.raw_response = error.read().decode(
+                        "utf-8", errors="replace"
+                    )
                     evidence.rejection_reason = f"HTTP {error.code}"
                     if error.code not in (429, 529):
                         return None
+                elif isinstance(error, json.JSONDecodeError):
+                    evidence.rejection_reason = (
+                        f"JSONDecodeError: {sanitize_error(error.msg)}"
+                    )
+                    return None
+                elif isinstance(error, ValidationError):
+                    first = error.errors()[0]["msg"] if error.errors() else str(error)
+                    evidence.rejection_reason = (
+                        f"ValidationError: {sanitize_error(first)}"
+                    )
+                    return None
                 else:
+                    detail = sanitize_error(str(error))
+                    evidence.rejection_reason = (
+                        f"{type(error).__name__}: {detail}"
+                        if detail
+                        else type(error).__name__
+                    )
                     return None
                 if (
                     sleep_seconds is None
@@ -458,31 +448,11 @@ class LlmPolicy:
 
     @staticmethod
     def _parse(raw: str) -> dict | None:
-        text = raw.strip()
-        if not text:
-            return None
-        if text.startswith("```"):
-            header, sep, rest = text.partition("\n")
-            if not sep:
-                return None
-            fence_lang = header[3:].strip().lower()
-            if fence_lang not in {"", "json"}:
-                return None
-            if not rest.endswith("```"):
-                return None
-            inner = rest[:-3]
-            if "```" in inner:
-                return None
-            text = inner.strip()
-        if not (text.startswith("{") and text.endswith("}")):
-            return None
         try:
-            parsed = json.loads(text)
-        except json.JSONDecodeError:
+            parsed = parse_json_object(raw)
+        except ValueError:
             return None
-        if not isinstance(parsed, dict) or "harvest" not in parsed:
-            return None
-        return parsed
+        return parsed if "harvest" in parsed else None
 
 
 POLICIES = {
