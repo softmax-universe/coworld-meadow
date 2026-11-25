@@ -131,6 +131,11 @@ def test_parse_reply_accepts_single_markdown_fence_without_inventing_actions():
 
     assert parse_reply('```json\n{"harvest": 99}\n```', 0, config) is None
     assert parse_reply('```json\n{"message": "no harvest"}\n```', 0, config) is None
+    assert parse_reply('Prose before {"harvest": 1}', 0, config) is None
+    assert parse_reply('{"harvest": 1} prose after', 0, config) is None
+    assert parse_reply('{"harvest": 1}\n{"harvest": 2}', 0, config) is None
+    assert parse_reply('```json\n{"harvest": 1}\n```\n```json\n{"harvest": 2}\n```', 0, config) is None
+    assert parse_reply('Here is my move:\n```json\n{"harvest": 1}\n```', 0, config) is None
 
 
 def test_manifest_registers_native_model_player_and_certification_baselines():
@@ -148,6 +153,10 @@ def test_manifest_registers_native_model_player_and_certification_baselines():
     assert llm["env"]["COWORLD_LLM_ENABLED"] == "true"
     assert llm["env"]["COWORLD_LLM_MODEL"] == "anthropic/claude-haiku-4.5"
     assert "COWORLD_LLM_ENDPOINT" not in llm["env"]
+    assert manifest["game"]["runnable"]["source_url"].startswith(
+        "https://github.com/softmax-universe/coworld-meadow/"
+    )
+    assert llm["source_url"].startswith("https://github.com/softmax-universe/coworld-meadow/")
 
     cert_ids = [slot["player_id"] for slot in manifest["certification"]["players"]]
     assert "llm" in cert_ids

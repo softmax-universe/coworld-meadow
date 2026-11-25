@@ -170,7 +170,8 @@ def test_llm_policy_parses_replies_and_builds_prompt(monkeypatch) -> None:
     monkeypatch.delenv("COWORLD_LLM_ENDPOINT", raising=False)
     policy = LlmPolicy
     assert policy._parse('{"harvest": 2}') == {"harvest": 2}
-    assert policy._parse('Sure! {"harvest": 1, "message": "hi"} done')["harvest"] == 1
+    assert policy._parse('```json\n{"harvest": 1, "message": "hi"}\n```') == {"harvest": 1, "message": "hi"}
+    assert policy._parse('Sure! {"harvest": 1, "message": "hi"} done') is None
     assert policy._parse("no json here") is None
     assert policy._parse('{"not_harvest": 2}') is None
 

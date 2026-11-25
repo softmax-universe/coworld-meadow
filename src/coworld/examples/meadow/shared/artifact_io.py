@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import tempfile
 import zlib
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -62,7 +63,17 @@ def write_data(
     if parsed.scheme in ("file", ""):
         path = Path(unquote(parsed.path)) if parsed.scheme == "file" else Path(uri)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(data)
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+            os.replace(tmp_name, path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
         return
     raise ValueError(f"Unsupported URI for write_data: {uri}")
 

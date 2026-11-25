@@ -447,6 +447,20 @@ async def _play_game() -> None:
                 content_type="application/json",
                 http_method=artifact_method("COGAME_SAVE_REPLAY_METHOD"),
             )
+            player_failure_uri = os.environ.get("COGAME_PLAYER_FAILURE_URI")
+            if player_failure_uri:
+                await asyncio.to_thread(
+                    write_data,
+                    player_failure_uri,
+                    json.dumps(
+                        {
+                            "message": summary[:2000],
+                            "failed_policy_index": failed[0][0],
+                        }
+                    ),
+                    content_type="application/json",
+                    http_method=artifact_method("COGAME_PLAYER_FAILURE_METHOD"),
+                )
             session.done = True
             for slot, websocket in list(session.players.items()):
                 with suppress(Exception):
