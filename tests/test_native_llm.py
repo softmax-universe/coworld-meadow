@@ -3,10 +3,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
 from uuid import uuid4
 
+import pytest
+
 from coworld.examples.meadow.game.engine import MeadowConfig, new_state, observation
-from coworld.examples.meadow.player.policies import LlmPolicy, system_prompt
+from coworld.examples.meadow.headless import PolicyFailureError, run_episode
+from coworld.examples.meadow.player.policies import LlmPolicy, SustainablePolicy, system_prompt
 from coworld.examples.meadow.shared.decision import apply_player_decision
 from coworld.examples.meadow.shared.prompts import PromptSelection
+from coworld.examples.meadow.shared.trajectory import Trajectory
 
 
 def test_native_player_captures_actual_request_response_and_applied_action(monkeypatch):
@@ -61,3 +65,53 @@ def test_native_player_captures_actual_request_response_and_applied_action(monke
     assert attempt.behavior_logprobs is None
     applied = apply_player_decision(decision, 1, config)
     assert applied.action.harvest == 2 and applied.attempts[0].parsed_action == applied.action.model_dump()
+
+
+@pytest.mark.parametrize("reply_text", ["not json", '{"harvest": 99}', '{"harvest": true}'])
+def test_native_player_invalid_output_fails_without_substitute_action(monkeypatch, reply_text):
+    call_id = str(uuid4())
+    response = {"model": "fixture/served", "content": [{"type": "text", "text": reply_text}],
+        "stop_reason": "end_turn", "usage": {"input_tokens": 3, "output_tokens": 1}}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            reply = json.dumps(response).encode()
+            self.send_response(200)
+            self.send_header("X-Softmax-Llm-Call-Id", call_id)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("COWORLD_LLM_ENDPOINT", f"http://127.0.0.1:{server.server_port}/")
+    monkeypatch.setenv("COWORLD_LLM_MODEL", "fixture/requested")
+    monkeypatch.setenv("COWORLD_LLM_TEMPERATURE", "0")
+    config = MeadowConfig(num_players=2, rounds=3)
+    trajectory = Trajectory(
+        episode_id="invalid-native",
+        game_version="source-fixture",
+        source_revision="a" * 40,
+        image_digest=None,
+        seed_family="meadow-0",
+    )
+    try:
+        with pytest.raises(PolicyFailureError) as exc_info:
+            run_episode(config, [LlmPolicy(), SustainablePolicy()], trajectory=trajectory)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+    assert exc_info.value.round_index == 0 and exc_info.value.slot == 0
+    assert exc_info.value.state.round == 0 and exc_info.value.state.history == []
+    assert exc_info.value.decisions[0].action is None
+    assert exc_info.value.decisions[0].attempts[0].response == reply_text
+    assert trajectory.records[-1].status == "failed"
+    assert trajectory.records[-1].outcome is None
+    assert trajectory.records[-1].participant_outcomes is None

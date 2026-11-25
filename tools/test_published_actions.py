@@ -1,4 +1,4 @@
-"""Complete a game with published bare-action clients and native action envelopes."""
+"""Verify canonical enveloped actions complete and legacy bare actions fail without scores."""
 import asyncio
 import json
 import os
@@ -14,9 +14,7 @@ from coworld.examples.meadow.shared.decision import PlayerDecision
 from coworld.examples.meadow.shared.trajectory import Attempt
 
 
-async def main():
-    root = Path(__file__).resolve().parents[1]
-    output = Path(sys.argv[1]).resolve()
+async def run_case(root: Path, output: Path, *, send_bare: bool) -> None:
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
@@ -28,7 +26,8 @@ async def main():
            "COGAME_CONFIG_URI": (output / "config.json").as_uri(), "COGAME_RESULTS_URI": (output / "results.json").as_uri(),
            "COGAME_SAVE_REPLAY_URI": (output / "replay.json").as_uri(),
            "COGAME_SAVE_TRAJECTORY_URI": (output / "trajectory.jsonl").as_uri(),
-           "COWORLD_EPISODE_ID": "published-actions", "COWORLD_GAME_VERSION": "fixture",
+           "COWORLD_EPISODE_ID": "bare-rejected" if send_bare else "canonical-envelopes",
+           "COWORLD_GAME_VERSION": "fixture",
            "COWORLD_SOURCE_REVISION": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
            "COWORLD_MEADOW_POST_GAME_LINGER_SECONDS": "0", "COWORLD_MEADOW_POST_GAME_MAX_LINGER_SECONDS": "0"}
     with (output / "game.log").open("w") as log:
@@ -39,6 +38,7 @@ async def main():
                 while "Application startup complete" not in (output / "game.log").read_text():
                     assert game.returncode is None
                     await asyncio.sleep(0.02)
+
                 async def play(seat):
                     async with websockets.connect(f"ws://127.0.0.1:{port}/player?slot={seat}&token={seat}") as ws:
                         async for raw in ws:
@@ -46,8 +46,10 @@ async def main():
                             if view["type"] == "final":
                                 return
                             action = {"harvest": 1, "message": "x" * 139 + " " + "beyond limit"}
-                            if seat < 4:
+                            if send_bare and seat == 0:
                                 packet = action
+                            elif seat < 4:
+                                packet = {"type": "action", "round": view["round"], "action": action}
                             else:
                                 attempt = Attempt(policy="public-contract", origin="unknown", prompt=None,
                                                   response=json.dumps(action))
@@ -55,21 +57,38 @@ async def main():
                                     action=parse_action(action, seat, MeadowConfig(num_players=8)),
                                     attempts=[attempt], selected_attempt_id=attempt.attempt_id).model_dump()
                             await ws.send(json.dumps(packet))
+
                 await asyncio.gather(*(play(seat) for seat in range(8)))
-                assert await game.wait() == 0
-            results = json.loads((output / "results.json").read_text())
-            assert results["scores"] == [60.0] * 8, results
-            events = [json.loads(line) for line in (output / "trajectory.jsonl").read_text().splitlines()]
-            decisions = [event for event in events if event["event_type"] == "decision"]
-            assert len(decisions) == 480
-            assert all(d["executed_action"]["message"] == "x" * 139 for d in decisions)
-            assert all(a["origin"] == "unknown" for d in decisions for a in d["attempts"])
-            assert (output / "replay.json").is_file()
-            print("480 decisions completed; bare and enveloped actions score equally, provenance remains unknown")
+                exit_code = await game.wait()
+            if send_bare:
+                assert exit_code != 0
+                assert not (output / "results.json").exists()
+                events = [json.loads(line) for line in (output / "trajectory.jsonl").read_text().splitlines()]
+                assert events[-1]["status"] == "failed" and events[-1]["outcome"] is None
+                assert events[0]["failure_reason"] == "invalid-action-envelope"
+                assert events[0]["executed_action"] is None
+            else:
+                assert exit_code == 0
+                results = json.loads((output / "results.json").read_text())
+                assert results["scores"] == [60.0] * 8, results
+                events = [json.loads(line) for line in (output / "trajectory.jsonl").read_text().splitlines()]
+                decisions = [event for event in events if event["event_type"] == "decision"]
+                assert len(decisions) == 480
+                assert all(d["executed_action"]["message"] == "x" * 139 for d in decisions)
+                assert all(a["origin"] == "unknown" for d in decisions for a in d["attempts"])
+                assert (output / "replay.json").is_file()
         finally:
             if game.returncode is None:
                 game.terminate()
             await game.wait()
+
+
+async def main():
+    root = Path(__file__).resolve().parents[1]
+    output = Path(sys.argv[1]).resolve()
+    await run_case(root, output / "canonical", send_bare=False)
+    await run_case(root, output / "bare-rejected", send_bare=True)
+    print("480 canonical decisions completed; legacy bare action rejected with no published scores")
 
 
 if __name__ == "__main__":

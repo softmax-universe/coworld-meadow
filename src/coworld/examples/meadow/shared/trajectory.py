@@ -58,9 +58,9 @@ class DecisionRecord(BaseModel):
     prompt: JsonValue
     attempts: list[Attempt]
     selected_attempt_id: str | None
-    executed_action: JsonValue
-    action_status: Literal["accepted", "fallback"]
-    fallback_origin: str | None
+    executed_action: JsonValue | None
+    action_status: Literal["accepted", "failed"]
+    failure_reason: str | None = None
     terminal: bool
 
 
@@ -75,9 +75,10 @@ class EpisodeRecord(BaseModel):
     game_version: str
     source_revision: str
     image_digest: str | None = None
-    status: Literal["completed", "truncated"]
-    outcome: JsonValue
-    participant_outcomes: JsonValue
+    status: Literal["completed", "failed", "truncated"]
+    outcome: JsonValue | None
+    participant_outcomes: JsonValue | None
+    failure_reason: str | None = None
 
 
 class Trajectory:
@@ -110,8 +111,8 @@ class Trajectory:
         observation: JsonValue,
         prompt: JsonValue,
         attempts: list[Attempt],
-        executed_action: JsonValue,
-        fallback_origin: str | None,
+        executed_action: JsonValue | None,
+        failure_reason: str | None,
         terminal: bool,
     ) -> None:
         if self.finished:
@@ -124,11 +125,14 @@ class Trajectory:
         if len({attempt.attempt_id for attempt in attempts}) != len(attempts):
             raise ValueError("duplicate attempt ID")
         selected = [attempt for attempt in attempts if attempt.accepted]
-        if fallback_origin is None:
+        if failure_reason is None:
             if len(selected) != 1 or selected[0].parsed_action != executed_action:
                 raise ValueError("selected parsed proposal must equal the independently executed action")
-        elif selected:
-            raise ValueError("fallback cannot retain an accepted model target")
+        else:
+            if selected:
+                raise ValueError("failed decision cannot retain an accepted model target")
+            if executed_action is not None:
+                raise ValueError("failed decision cannot execute a substitute action")
         self.records.append(
             DecisionRecord(
                 episode_id=self.episode_id,
@@ -143,20 +147,33 @@ class Trajectory:
                 attempts=attempts,
                 selected_attempt_id=selected[0].attempt_id if selected else None,
                 executed_action=executed_action,
-                action_status="fallback" if fallback_origin else "accepted",
-                fallback_origin=fallback_origin,
+                action_status="failed" if failure_reason else "accepted",
+                failure_reason=failure_reason,
                 terminal=terminal,
             )
         )
 
-    def finish(self, *, outcome: JsonValue, participant_outcomes: JsonValue, completed: bool) -> None:
+    def finish(
+        self,
+        *,
+        outcome: JsonValue | None,
+        participant_outcomes: JsonValue | None,
+        completed: bool,
+        failure_reason: str | None = None,
+    ) -> None:
         if self.finished:
             raise ValueError("episode has already ended")
-        calls_finished = all(
-            attempt.latency_ms is not None for record in self.records
-            if isinstance(record, DecisionRecord) for attempt in record.attempts
-            if attempt.origin == "model"
-        )
+        if failure_reason is not None:
+            if outcome is not None or participant_outcomes is not None:
+                raise ValueError("failed episode cannot publish scores or outcomes")
+            status: Literal["completed", "failed", "truncated"] = "failed"
+        else:
+            calls_finished = all(
+                attempt.latency_ms is not None for record in self.records
+                if isinstance(record, DecisionRecord) for attempt in record.attempts
+                if attempt.origin == "model"
+            )
+            status = "completed" if completed and calls_finished else "truncated"
         self.records.append(
             EpisodeRecord(
                 episode_id=self.episode_id,
@@ -164,9 +181,10 @@ class Trajectory:
                 game_version=self.game_version,
                 source_revision=self.source_revision,
                 image_digest=self.image_digest,
-                status="completed" if completed and calls_finished else "truncated",
+                status=status,
                 outcome=outcome,
                 participant_outcomes=participant_outcomes,
+                failure_reason=failure_reason,
             )
         )
         self.finished = True

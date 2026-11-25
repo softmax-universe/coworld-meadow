@@ -30,7 +30,8 @@ The bundled variants `default`, `anonymous`, and `institutions` cover the main g
 ## Roles in this package
 
 - **game** — round-barrier websocket server (`game/server.py`) over a pure engine (`game/engine.py`). Rounds settle
-  when every connected player has submitted or `round_seconds` elapses; missing players pass.
+  when every player has submitted a valid action; invalid or missing players fail the episode without substitute moves
+  or published scores.
 - **players** — scripted baselines (`sustainable`, `greedy`, `reciprocator`, `deterrable`, `enforcer`, `random`) and
   an `llm` seat (`player/policies.py`). The LLM seat follows
   Native Messages through `COWORLD_LLM_ENDPOINT`; `COWORLD_LLM_MODEL` chooses the model.

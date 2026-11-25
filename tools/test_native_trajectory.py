@@ -254,12 +254,13 @@ def main() -> None:
                             stderr=log,
                         )
                     )
-                assert (
-                    game.wait(
-                        timeout=60 + config["rounds"] * config["round_seconds"]
-                    )
-                    == 0
-                ), (folder / "game.log").read_text()
+                exit_code = game.wait(
+                    timeout=60 + config["rounds"] * config["round_seconds"]
+                )
+                if mode in {"accepted", "greedy"}:
+                    assert exit_code == 0, (folder / "game.log").read_text()
+                else:
+                    assert exit_code != 0, (folder / "game.log").read_text()
                 for slot, player in enumerate(players):
                     assert player.wait(timeout=5) == 0, (
                         folder / f"player-{slot}.log"
@@ -277,12 +278,25 @@ def main() -> None:
             json.loads(line)
             for line in (folder / "trajectory.jsonl").read_text().splitlines()
         ]
-        assert (
-            events[-1]["status"] == "completed"
-            and events[-1]["outcome"]["rounds"] == config["rounds"]
-        )
         decisions = events[:-1]
-        assert len(decisions) == config["rounds"] * len(config["players"])
+        if mode in {"accepted", "greedy"}:
+            assert (
+                events[-1]["status"] == "completed"
+                and events[-1]["outcome"]["rounds"] == config["rounds"]
+            )
+            assert len(decisions) == config["rounds"] * len(config["players"])
+            assert (folder / "results.json").is_file()
+        else:
+            assert events[-1]["status"] == "failed"
+            assert events[-1]["outcome"] is None
+            assert events[-1]["participant_outcomes"] is None
+            assert events[-1]["failure_reason"]
+            assert len(decisions) == len(config["players"])
+            assert not (folder / "results.json").exists()
+            replay_data = json.loads((folder / "replay.json").read_text())
+            assert replay_data["failed"] is True
+            assert replay_data["results"] is None
+            assert replay_data["frames"] == []
         seen = set()
         for decision in decisions:
             assert (
@@ -337,8 +351,9 @@ def main() -> None:
                     assert chosen["model"] == "fixture/served"
             else:
                 assert (
-                    decision["action_status"] == "fallback"
+                    decision["action_status"] == "failed"
                     and decision["selected_attempt_id"] is None
+                    and decision["executed_action"] is None
                 )
                 assert all(
                     not attempt["accepted"] for attempt in decision["attempts"]

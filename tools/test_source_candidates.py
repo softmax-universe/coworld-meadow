@@ -86,7 +86,7 @@ def main() -> None:
                 )
                 assert (
                     decision["action_status"] == "accepted"
-                    and decision["fallback_origin"] is None
+                    and decision["failure_reason"] is None
                 )
         final = events[-1]
         assert (

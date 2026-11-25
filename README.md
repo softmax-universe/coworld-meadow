@@ -152,10 +152,12 @@ PYTHONPATH=src python tools/export_posttrain.py /tmp/meadow-private-teachers --v
 
 The exporter produces canonical private trajectories and pinned teacher configurations. The shared Coworld qualifier and Metta importer select policy/seat targets and own seed-family dataset splitting. Whole episodes and outcomes stay available for independent label review. Production training releases require deployment and verification of the reviewed shared runtime; local fixtures do not establish trained game strength.
 
-Published player images may send bare harvest/sanction/message actions. The server preserves that wire contract
-alongside native action envelopes; bare actions have unknown provenance and are never relabeled as model or teacher samples.
-Run `python tools/test_published_actions.py /tmp/meadow-published-actions` for a complete mixed-client game.
-Old Bedrock player images must be rebuilt with the native sidecar player; game upgrades cannot supply their missing provider configuration.
+Players submit canonical `PlayerDecision` envelopes (`{"type": "action", "round": ..., "action": ...}`). Legacy bare
+actions without an envelope are rejected; invalid, missing, or timed-out model decisions terminate the episode as an
+explicit policy failure with no substitute action and no published scores, while retaining all failed attempt evidence.
+Run `python tools/test_published_actions.py /tmp/meadow-published-actions` to verify canonical envelopes and bare-action
+rejection. Old Bedrock player images must be rebuilt with the native sidecar player; game upgrades cannot supply their
+missing provider configuration.
 
 The published image also contains the native LLM player. Create a separate policy using
 `python -m coworld.examples.meadow.player.player llm` and enable its hosted LLM sidecar.

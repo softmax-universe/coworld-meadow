@@ -25,8 +25,12 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
 
-from coworld.examples.meadow.game.engine import MeadowConfig, RoundAction, parse_action
-from coworld.examples.meadow.shared.decision import PlayerDecision, decision_prompt
+from coworld.examples.meadow.game.engine import MeadowConfig, parse_action
+from coworld.examples.meadow.shared.decision import (
+    PlayerDecision,
+    decision_prompt,
+    parse_reply,
+)
 from coworld.examples.meadow.shared.trajectory import Attempt
 from coworld.examples.meadow.shared.prompts import PromptSelection
 
@@ -266,12 +270,7 @@ class LlmPolicy:
         raw = self._complete_messages(
             prompt, obs["slot"], attempts, deadline, on_attempt
         )
-        parsed_action = self._parse(raw) if raw is not None else None
-        action = (
-            parse_action(parsed_action, obs["slot"], config)
-            if parsed_action is not None
-            else None
-        )
+        action = parse_reply(raw, obs["slot"], config) if raw is not None else None
         selected = None
         if action is not None:
             attempts[-1].parsed_action = action.model_dump()
@@ -284,10 +283,10 @@ class LlmPolicy:
                 attempts[-1].rejection_reason = "invalid native action reply"
         return PlayerDecision(
             round=obs["round"],
-            action=action if action is not None else RoundAction(),
+            action=action,
             attempts=attempts,
             selected_attempt_id=selected,
-            fallback_origin=None
+            failure_reason=None
             if selected is not None
             else "native-call-or-parser-failure",
         )
@@ -383,6 +382,7 @@ class LlmPolicy:
                 HTTPError,
                 URLError,
                 TimeoutError,
+                OSError,
                 json.JSONDecodeError,
                 ValidationError,
             ) as error:
@@ -395,7 +395,8 @@ class LlmPolicy:
                     )
                     evidence.raw_response = error.read().decode()
                     if error.code not in (429, 529):
-                        raise
+                        evidence.rejection_reason = f"HTTP {error.code}"
+                        return None
                 else:
                     return None
                 if (
@@ -472,7 +473,7 @@ def policy_decision(
         action=action,
         attempts=[attempt],
         selected_attempt_id=attempt.attempt_id,
-        fallback_origin=None,
+        failure_reason=None,
     )
 
 

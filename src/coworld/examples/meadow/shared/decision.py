@@ -22,18 +22,23 @@ class PlayerDecision(BaseModel):
 
     type: Literal["action"] = "action"
     round: int = Field(ge=0)
-    action: RoundAction
+    action: RoundAction | None = None
     attempts: list[Attempt] = Field(default_factory=list)
     selected_attempt_id: str | None = None
-    fallback_origin: str | None = None
+    failure_reason: str | None = None
 
 
 def parse_reply(raw: str, slot: int, config: MeadowConfig) -> RoundAction | None:
-    """Use the shipped text parser, then the engine's legal-action normalization."""
+    """Use the shipped text parser, then strict engine validation."""
     from coworld.examples.meadow.player.policies import LlmPolicy
 
     parsed = LlmPolicy._parse(raw)
-    return parse_action(parsed, slot, config) if parsed is not None else None
+    if parsed is None:
+        return None
+    try:
+        return parse_action(parsed, slot, config)
+    except ValueError:
+        return None
 
 
 def apply_player_decision(
@@ -45,13 +50,29 @@ def apply_player_decision(
         attempt.accepted = False
         if attempt.origin in {"teacher", "human"}:
             attempt.origin = "unknown"
-    canonical = parse_action(decision.action.model_dump(), slot, config)
-    if not decision.attempts and decision.fallback_origin is None:
+    if len({attempt.attempt_id for attempt in decision.attempts}) != len(
+        decision.attempts
+    ):
+        raise ValueError("duplicate native attempt identity")
+    if decision.failure_reason is not None or decision.action is None:
+        if decision.selected_attempt_id is not None:
+            raise ValueError("failed decision cannot select an attempt")
+        decision.action = None
+        decision.failure_reason = decision.failure_reason or "missing-action"
+        return decision
+    try:
+        canonical = parse_action(decision.action.model_dump(), slot, config)
+    except ValueError:
+        decision.action = None
+        decision.selected_attempt_id = None
+        decision.failure_reason = "invalid-action"
+        return decision
+    if not decision.attempts:
         attempt = Attempt(
             policy="external-action",
             origin="unknown",
             prompt=None,
-            response=decision.action.model_dump_json(),
+            response=canonical.model_dump_json(),
             parsed_action=canonical.model_dump(),
             accepted=True,
             rejection_reason=None,
@@ -63,15 +84,6 @@ def apply_player_decision(
         for attempt in decision.attempts
         if attempt.attempt_id == decision.selected_attempt_id
     ]
-    if len({attempt.attempt_id for attempt in decision.attempts}) != len(
-        decision.attempts
-    ):
-        raise ValueError("duplicate native attempt identity")
-    if decision.fallback_origin is not None:
-        if decision.selected_attempt_id is not None:
-            raise ValueError("fallback cannot select an attempt")
-        decision.action = RoundAction()
-        return decision
     if len(selected) != 1:
         raise ValueError("submitted decision must select exactly one response")
     attempt = selected[0]
@@ -83,9 +95,9 @@ def apply_player_decision(
         attempt.rejection_reason = (
             "model response differs from submitted canonical action"
         )
-        decision.action = RoundAction()
+        decision.action = None
         decision.selected_attempt_id = None
-        decision.fallback_origin = "player-parser-mismatch"
+        decision.failure_reason = "player-parser-mismatch"
         return decision
     attempt.accepted = True
     attempt.rejection_reason = None
