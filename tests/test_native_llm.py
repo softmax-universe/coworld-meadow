@@ -284,3 +284,108 @@ def test_self_sanction_records_exact_engine_error_in_private_attempt(monkeypatch
     assert decision.action is None
     assert decision.failure_reason == "invalid-native-reply"
     assert decision.attempts[0].rejection_reason == "invalid sanction target: 0"
+
+
+@pytest.mark.parametrize(
+    "reply_text,expected_code",
+    [
+        ('SECRET_MODEL_TOKEN\n```json\n{"harvest": 1}\n```', "not-single-json-object"),
+        ('{"harvest": 1, "SECRET_MODEL_TOKEN": "value"}', "unexpected-action-fields"),
+        ('{"harvest": 1, "sanction": 0}', "invalid-sanction-target"),
+        ('{"harvest": 1, "sanction": "SECRET_MODEL_TOKEN"}', "invalid-sanction-target"),
+    ],
+)
+def test_private_player_log_distinguishes_parser_failures_without_leaking_output(
+    monkeypatch, caplog, reply_text, expected_code
+):
+    call_id = str(uuid4())
+    response = {
+        "model": "fixture/served",
+        "content": [{"type": "text", "text": reply_text}],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 3, "output_tokens": 5},
+    }
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            payload = json.dumps(response).encode("utf-8")
+            self.send_response(200)
+            self.send_header("X-Softmax-Llm-Call-Id", call_id)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("COWORLD_LLM_ENDPOINT", f"http://127.0.0.1:{server.server_port}/")
+    monkeypatch.setenv("COWORLD_LLM_MODEL", "fixture/requested")
+    config = MeadowConfig(num_players=2, rounds=3, sanctions_enabled=True, chat_enabled=True)
+    view = observation(new_state(config), config, 0, ["one", "two"], 20)
+    view["prompt_configuration"] = PromptSelection().model_dump()
+    try:
+        with caplog.at_level("WARNING", logger="coworld.examples.meadow.player.policies"):
+            decision = LlmPolicy().act(view)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert decision.action is None
+    assert decision.selected_attempt_id is None
+    assert decision.failure_reason == "invalid-native-reply"
+    assert (
+        f"round 0 seat 0 native decision failed: invalid-native-reply ({expected_code})"
+        in caplog.text
+    )
+    assert "SECRET_MODEL_TOKEN" not in caplog.text
+
+
+def test_private_player_log_bounds_http_503_without_leaking_credentials(
+    monkeypatch, caplog
+):
+    call_id = str(uuid4())
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            payload = b'{"error": "Bearer SECRET_CREDENTIAL_TOKEN"}'
+            self.send_response(503)
+            self.send_header("X-Softmax-Llm-Call-Id", call_id)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setenv("COWORLD_LLM_ENDPOINT", f"http://127.0.0.1:{server.server_port}/")
+    monkeypatch.setenv("COWORLD_LLM_MODEL", "fixture/requested")
+    config = MeadowConfig(num_players=2, rounds=3)
+    view = observation(new_state(config), config, 0, ["one", "two"], 20)
+    view["prompt_configuration"] = PromptSelection().model_dump()
+    try:
+        with caplog.at_level("WARNING", logger="coworld.examples.meadow.player.policies"):
+            decision = LlmPolicy().act(view)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert decision.action is None
+    assert decision.selected_attempt_id is None
+    assert decision.failure_reason == "native-call-failure"
+    assert (
+        "round 0 seat 0 native decision failed: native-call-failure (http-503)"
+        in caplog.text
+    )
+    assert "SECRET_CREDENTIAL_TOKEN" not in caplog.text
