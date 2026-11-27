@@ -212,6 +212,42 @@ def system_prompt(
     )
 
 
+_LOG_REASON_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("empty reply", "empty-reply"),
+    ("unclosed code fence", "unclosed-code-fence"),
+    ("unsupported code fence language:", "unsupported-code-fence-language"),
+    ("multiple code fences", "multiple-code-fences"),
+    ("reply is not a single JSON object", "not-single-json-object"),
+    ("JSONDecodeError:", "json-decode-error"),
+    ("reply JSON must be an object", "json-not-object"),
+    ("action must be a JSON object", "action-not-object"),
+    ("unexpected action fields:", "unexpected-action-fields"),
+    ("action requires 'harvest'", "missing-harvest"),
+    ("harvest must be an integer", "invalid-harvest"),
+    ("sanctions are not enabled", "sanctions-disabled"),
+    ("invalid sanction target:", "invalid-sanction-target"),
+    ("message must be a string or null", "invalid-message-type"),
+    ("chat is not enabled", "chat-disabled"),
+)
+
+
+def _bounded_log_reason(failure_reason: str, rejection_reason: str | None) -> str:
+    """Map private rejection details to a closed vocabulary safe for player logs."""
+    reason = (rejection_reason or "").strip()
+    for prefix, code in _LOG_REASON_PREFIXES:
+        if reason.startswith(prefix):
+            return code
+    if failure_reason == "native-call-failure":
+        if reason.startswith("HTTP "):
+            parts = reason.split()
+            if len(parts) >= 2 and parts[1].isdigit() and len(parts[1]) == 3:
+                return f"http-{parts[1]}"
+        if reason.startswith("TimeoutError") or "timed out" in reason.lower():
+            return "timeout"
+        return "call-error"
+    return "other-rejection"
+
+
 class NativeText(BaseModel):
     type: str
     text: str = ""
@@ -297,10 +333,13 @@ class LlmPolicy:
         else:
             self.llm_failures += 1
             logger.warning(
-                "round %d seat %d native decision failed: %s",
+                "round %d seat %d native decision failed: %s (%s)",
                 obs["round"],
                 obs["slot"],
                 failure_reason,
+                _bounded_log_reason(
+                    failure_reason, attempts[-1].rejection_reason if attempts else None
+                ),
             )
         return PlayerDecision(
             round=obs["round"],
